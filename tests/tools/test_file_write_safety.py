@@ -572,6 +572,71 @@ class TestProtectedInstructionFiles:
         assert not res.get("error"), res
         assert approvals["calls"] == []
 
+    # ---- option B: the home exemption is exactly ONE file --------------
+
+    def test_home_exemption_is_exactly_the_own_soul_md(
+        self, tmp_path, approvals, monkeypatch
+    ):
+        """The active home's exemption is exactly ONE file — its own SOUL.md.
+
+        Self-editing your own soul stays possible (that is B, by opposition to
+        A) while the sibling instruction files at the same level are gated.
+        """
+        import tools.file_tools_write_guards as ft
+        fake_home = tmp_path / ".hermes"
+        fake_home.mkdir()
+        monkeypatch.setattr(
+            ft, "_get_real_hermes_home", lambda: str(fake_home.resolve())
+        )
+        approvals["answer"] = "deny"
+        res = self._write(fake_home / "SOUL.md", "my own soul\n")
+        assert not res.get("error"), res
+        assert approvals["calls"] == []
+        assert (fake_home / "SOUL.md").read_text(encoding="utf-8") == "my own soul\n"
+        # ... and nothing else at that level rides the exemption.
+        res2 = self._write(fake_home / "AGENTS.md")
+        assert res2.get("error") and "BLOCKED" in res2["error"]
+        assert not (fake_home / "AGENTS.md").exists()
+        assert len(approvals["calls"]) == 1
+
+    @pytest.mark.parametrize("name", ["AGENTS.md", "CLAUDE.md", ".cursorrules"])
+    def test_home_root_instruction_files_are_gated(
+        self, tmp_path, approvals, monkeypatch, name
+    ):
+        """HERMES_HOME=~/.hermes must NOT exempt its root instruction files.
+
+        The incident case: only SOUL.md is exempted, every other protected
+        basename keeps the approval gate.
+        """
+        import tools.file_tools_write_guards as ft
+        fake_home = tmp_path / ".hermes"
+        fake_home.mkdir()
+        monkeypatch.setattr(
+            ft, "_get_real_hermes_home", lambda: str(fake_home.resolve())
+        )
+        approvals["answer"] = "deny"
+        res = self._write(fake_home / name)
+        assert res.get("error") and "BLOCKED" in res["error"]
+        assert not (fake_home / name).exists()
+        assert len(approvals["calls"]) == 1
+
+    def test_other_profile_soul_md_under_home_is_gated(
+        self, tmp_path, approvals, monkeypatch
+    ):
+        """Profile isolation: no profile rewrites another profile's SOUL.md."""
+        import tools.file_tools_write_guards as ft
+        fake_home = tmp_path / ".hermes"
+        other = fake_home / "profiles" / "dev"
+        other.mkdir(parents=True)
+        monkeypatch.setattr(
+            ft, "_get_real_hermes_home", lambda: str(fake_home.resolve())
+        )
+        approvals["answer"] = "deny"
+        res = self._write(other / "SOUL.md")
+        assert res.get("error") and "BLOCKED" in res["error"]
+        assert not (other / "SOUL.md").exists()
+        assert len(approvals["calls"]) == 1
+
     # ---- patch tool -----------------------------------------------------
 
     def test_patch_replace_mode_is_gated(self, tmp_path, approvals):

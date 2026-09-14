@@ -179,11 +179,15 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
     except (OSError, ValueError, RuntimeError):
         resolved = os.path.realpath(normalized)
 
-    # ~/.hermes itself is governed by its own guards (config.yaml hard-block,
-    # mirror guard, write_approval); this gate targets PROJECT-LOCAL files only.
-    # Must run before the ``.hermes`` component rule, which would match the home.
+    # Inside the ACTIVE profile's home the exemption is exactly ONE file: that
+    # profile's own SOUL.md. Everything else keeps the basename matching below,
+    # so no profile can rewrite another profile's SOUL.md/AGENTS.md and the
+    # `default` profile (HERMES_HOME=~/.hermes) can no longer rewrite every
+    # instruction file under it.
     real_home = _get_real_hermes_home()
-    if real_home and (resolved == real_home or resolved.startswith(real_home + os.sep)):
+    under_real_home = bool(real_home) and (
+        resolved == real_home or resolved.startswith(real_home + os.sep))
+    if under_real_home and real_home and resolved == os.path.join(real_home, "SOUL.md"):
         return None
 
     for candidate in (normalized, resolved):
@@ -192,6 +196,12 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
         if base_lower in _PROTECTED_INSTRUCTION_BASENAMES or any(
                 fnmatch.fnmatch(base_lower, pattern.lower()) for pattern in extra_patterns):
             return base
+        if under_real_home:
+            # The ``.hermes`` component rule targets PROJECT-LOCAL <repo>/.hermes
+            # trees. Under the real home it would gate .env, locks, sibling
+            # profile files... already covered by their own guards (config.yaml
+            # hard-block, mirror guard, write_approval) — keep the exemption.
+            continue
         # Project-local .hermes config dirs (<repo>/.hermes/config.yaml) steer
         # behavior too. Only the IMMEDIATE parent counts — matching any ancestor
         # would gate every write inside a checkout living under ~/.hermes.
