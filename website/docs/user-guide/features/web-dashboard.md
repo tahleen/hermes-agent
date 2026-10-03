@@ -445,16 +445,22 @@ Returns agent version, gateway status, platform states, and active session count
 The response also carries two advisory resource blocks (they never affect the
 `components`/`overall` health verdict):
 
-- **`memory`** — distilled from the gateway's 30-second heartbeat and the
-  lifecycle ledger. Fields: `pressure` (`ok` / `elevated` / `critical` /
-  `unknown`), `gateway_rss_mb`, `system_total_mb`, `system_available_mb`,
-  `swap_used_mb`, `sampled_at`, `boot_id`, `last_boot_unclean`,
+- **`memory`** — distilled from the gateway's 30-second heartbeat, the
+  lifecycle ledger, and the host sample the host-memory watch cron writes at
+  `state/host-mem.json` (5-minute cadence). Fields: `pressure` (`ok` /
+  `elevated` / `critical` / `unknown`), `gateway_rss_mb`, `system_total_mb`,
+  `system_available_mb`, `swap_used_mb`, `sampled_at`, `host_available_mb`,
+  `host_compression_mb`, `host_sampled_at`, `boot_id`, `last_boot_unclean`,
   `last_boot_suspected_oom`. Pressure is `elevated` below 128 MiB (or 15%) of
   available system memory and `critical` below 64 MiB (or 5%) — the same
   levels at which a subsequent unclean exit would be flagged as a suspected
   OOM kill. Heartbeats older than 150 seconds (or future-dated) keep their
   numbers but degrade `pressure` to `unknown`, so a dead gateway's last
-  sample can't masquerade as a live reading.
+  sample can't masquerade as a live reading. The host sample can force
+  `critical` on its own: the VM thresholds are fractions of the VM's own cap
+  and stay `ok` while the host runs out. The host arm goes quiet past two
+  missed writer ticks — the VM rule then decides alone, never a default
+  `ok`.
 - **`disk`** — a live `shutil.disk_usage()` sample of the volume holding
   `~/.hermes`. Fields: `pressure`, `free_mb`, `total_mb`, `used_percent`,
   `sampled_at`. Pressure is `elevated` below 512 MB free (or ≥85% used with

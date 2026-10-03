@@ -1886,23 +1886,42 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     return total
 
 
+def _host_memory_pressure_level() -> str:
+    """Host arm of the guard — the VM's own sample cannot see the host.
+
+    Module-level indirection is also the test seam, like :func:`_system_memory_sample`.
+    """
+    try:
+        from gateway.memory_status import host_pressure
+
+        return host_pressure()
+    except Exception:
+        return "unknown"
+
+
 def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
     """Classify system memory pressure: ok/elevated/critical/unknown.
 
-    Reuses :func:`gateway.memory_status.classify_pressure` so "critical" matches
-    the dashboard banner and lifecycle-ledger OOM heuristics. ``unknown``
-    (non-Linux, read failure) imposes no restriction — never brick dispatch
-    where /proc is unavailable.
+    Reuses :func:`gateway.memory_status.classify_pressure` so "critical" matches the dashboard
+    banner and lifecycle-ledger OOM heuristics, and combines it with the HOST arm
+    (:func:`gateway.memory_status.host_pressure`): the VM thresholds are fractions of the VM's
+    own cap, so "ok" inside the VM while the host runs out of pocket is exactly the blind spot
+    of 03/10/2026.  ``unknown`` (non-Linux, read failure, no host sample) imposes no restriction
+    — never brick dispatch where /proc is unavailable.
     """
-    if sample is None:
-        sample = _system_memory_sample()
-    if not sample:
-        return "unknown"
     try:
-        from gateway.memory_status import classify_pressure
-        return classify_pressure(sample.get("mem_available_kib"), sample.get("mem_total_kib"))
+        from gateway.memory_status import classify_pressure, combine_pressure
     except Exception:
         return "unknown"
+    if sample is None:
+        sample = _system_memory_sample()
+    level = "unknown"
+    if sample:
+        try:
+            level = classify_pressure(sample.get("mem_available_kib"), sample.get("mem_total_kib"))
+        except Exception:
+            level = "unknown"
+    return combine_pressure(level, _host_memory_pressure_level())
 
 
 def dispatch_once(

@@ -1959,6 +1959,10 @@ export interface MemoryPressureStatus {
   system_total_mb?: number | null;
   system_available_mb?: number | null;
   swap_used_mb?: number | null;
+  /** HOST (not VM) sample written by the host-memory watch cron; null when absent. */
+  host_available_mb?: number | null;
+  host_compression_mb?: number | null;
+  host_sampled_at?: string | null;
   sampled_at?: string | null;
   /** Previous gateway life died without running any exit path. */
   last_boot_unclean?: boolean;

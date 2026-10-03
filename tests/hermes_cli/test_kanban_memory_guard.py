@@ -17,6 +17,8 @@ Covers the two safeguards added in response:
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -253,3 +255,43 @@ def test_dispatch_critical_pressure_still_runs_reclaim_bookkeeping(
     assert res.memory_pressure == "critical"
     assert row is not None
     assert row.status == "ready"
+
+
+def test_dispatch_brakes_on_host_pressure_with_a_comfortable_vm(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """The VM's own sample can read fine while the HOST runs out of pocket (03/10/2026):
+    the guard must brake on the host arm too, not only on the VM fractions."""
+    monkeypatch.setattr(kbd, "_system_memory_sample", lambda: _pressure_sample("ok"))
+    state = kanban_home.joinpath("state")
+    state.mkdir(parents=True, exist_ok=True)
+    state.joinpath("host-mem.json").write_text(
+        json.dumps(
+            {
+                "streak": 4,
+                "alerte_en_cours": True,
+                "dernier_echantillon": {
+                    "sampled_at": datetime.now(timezone.utc).isoformat(),
+                    "mem_free_gb": 2.0,
+                    "mem_total_gb": 31.9,
+                    "compress_gb": 1.0,
+                    "vmmem_gb": 8.6,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    spawns = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append(task.id)
+        return 42
+
+    with kbc.connect() as conn:
+        for title in ("a", "b"):
+            kb.create_task(conn, title=title, assignee="alice")
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+
+    assert not spawns
+    assert not res.spawned
+    assert res.memory_pressure == "critical"

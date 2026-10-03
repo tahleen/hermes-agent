@@ -37,6 +37,34 @@ def _write_sentinel(home: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_host_state(
+    home: Path,
+    *,
+    sampled_at: datetime = _NOW,
+    mem_free_gb: float = 8.0,
+    compress_gb: float = 1.0,
+    streak: int = 0,
+    alerte_en_cours: bool = False,
+) -> None:
+    """The sample `~/.hermes/scripts/veille-host-mem.py` writes every 5 min."""
+    path = home.joinpath("state", "host-mem.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "streak": streak,
+        "alerte_en_cours": alerte_en_cours,
+        "dernier_echantillon": {
+            "sampled_at": sampled_at.isoformat(),
+            "mem_free_gb": mem_free_gb,
+            "mem_total_gb": 31.9,
+            "compress_gb": compress_gb,
+            "vmmem_gb": 8.6,
+        },
+        "seuils": {"libre_go": 5.0, "compression_go": 2.0, "n": 3, "marge_go": 0.5},
+        "dernier_publie": "sain",
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 class TestClassifyPressure:
     def test_plentiful_memory_is_ok(self) -> None:
         # 1 GiB available of 2 GiB total.
@@ -182,3 +210,63 @@ class TestCollectMemoryStatus:
         status = collect_memory_status(tmp_path, now=_NOW)
         assert status["pressure"] == "unknown"
         assert status["gateway_rss_mb"] is None
+
+    def test_starved_host_is_critical_while_the_vm_reads_ok(self, tmp_path: Path) -> None:
+        # Measured 03/10/2026, same second: the VM read "11.6 GiB of 15.6 free" (ok, 71% free)
+        # while the host sat at 63.7% used with the VM still able to claim ~7 GiB of its pocket.
+        # The VM rule can never see that — the host sample has to decide.
+        vm = {"mem_total_kib": 8 * 1024 * 1024, "mem_available_kib": 4 * 1024 * 1024}
+        _write_heartbeat(tmp_path, updated_at=_NOW - timedelta(seconds=30), mem=dict(vm))
+        _write_host_state(
+            tmp_path, sampled_at=_NOW - timedelta(seconds=60), mem_free_gb=2.0, compress_gb=1.0
+        )
+        # The VM arm alone is happy; only the host arm makes this critical.
+        assert classify_pressure(vm["mem_available_kib"], vm["mem_total_kib"]) == "ok"
+        status = collect_memory_status(tmp_path, now=_NOW)
+        assert status["pressure"] == "critical"
+        assert status["host_available_mb"] == 2048
+
+    def test_stale_host_sample_falls_back_to_the_vm_rule(self, tmp_path: Path) -> None:
+        # Past the writer cadence the host arm abstains: the VM rule decides alone — never "ok"
+        # by default, never a phantom "critical" from a sample nobody refreshed.
+        vm = {"mem_total_kib": 8 * 1024 * 1024, "mem_available_kib": 4 * 1024 * 1024}
+        _write_heartbeat(tmp_path, updated_at=_NOW - timedelta(seconds=30), mem=dict(vm))
+        _write_host_state(
+            tmp_path,
+            sampled_at=_NOW - timedelta(hours=2),
+            mem_free_gb=2.0,
+            compress_gb=3.5,
+            streak=9,
+        )
+        assert collect_memory_status(tmp_path, now=_NOW)["pressure"] == "ok"
+        _write_host_state(
+            tmp_path,
+            sampled_at=_NOW - timedelta(seconds=60),
+            mem_free_gb=2.0,
+            compress_gb=3.5,
+            streak=9,
+        )
+        assert collect_memory_status(tmp_path, now=_NOW)["pressure"] == "critical"
+
+    def test_compression_counts_only_once_the_producer_confirms_it(self, tmp_path: Path) -> None:
+        # Compression is noisy at rest (~1 Go baseline, 3-4 Go spikes measured 03/10/2026), so
+        # one sample over the ceiling is not a verdict — consecutive ones are (the producer's own
+        # counter, the same one its Telegram alert rides).
+        vm = {"mem_total_kib": 8 * 1024 * 1024, "mem_available_kib": 4 * 1024 * 1024}
+        _write_heartbeat(tmp_path, updated_at=_NOW - timedelta(seconds=30), mem=dict(vm))
+        _write_host_state(
+            tmp_path,
+            sampled_at=_NOW - timedelta(seconds=60),
+            mem_free_gb=9.0,
+            compress_gb=3.5,
+            streak=1,
+        )
+        assert collect_memory_status(tmp_path, now=_NOW)["pressure"] == "ok"
+        _write_host_state(
+            tmp_path,
+            sampled_at=_NOW - timedelta(seconds=60),
+            mem_free_gb=9.0,
+            compress_gb=3.5,
+            streak=3,
+        )
+        assert collect_memory_status(tmp_path, now=_NOW)["pressure"] == "critical"
