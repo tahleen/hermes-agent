@@ -38,11 +38,16 @@ _HEARTBEAT_FRESH_TTL_S = 150.0
 # (``memory=`` in .wslconfig) and cannot see the resource that actually runs out when the VM
 # grows: the host's.  Measured 03/10/2026 in the same second -- the VM read "11.6 GiB of 15.6
 # free" (ok) while the host sat at 63.7% used, with the VM still able to claim ~7 GiB more.
-# Both host numbers are ABSOLUTE and DERIVED from the machine geometry, the same derivation
-# as the producer (~/.hermes/scripts/veille-host-mem.py):
+# Both host numbers are ABSOLUTE and DERIVED from the machine geometry by the producer
+# (~/.hermes/scripts/veille-host-mem.py), which publishes that derivation in the state file's
+# ``seuils`` block; the two constants below are only the DEFAULTS for when that block is absent
+# or malformed -- the live guard-rail follows ``seuils["libre_go"]`` / ``seuils["compression_go"]``
+# so it cannot keep a second, silently drifting derivation.  Recalibrated 04/10/2026:
 #   free floor          = host total - non-VM footprint - VM cap = 31.9 - 11.44 - 16.0 = 4.46
 #                         -> posed at 5.0 Go, so it fires before the worst case is reached
-#   compression ceiling = 2.0 Go, well above the ~1.0 Go measured at rest
+#   compression ceiling = 4.5 Go, posed above the highest value ever observed (4.19 Go over the
+#                         68 samples 03/10 21:52 -> 04/10 09:59); the old 2.0 Go spoke about the
+#                         NORMAL regime and is now only a fallback
 # Re-derive both when ``memory=`` or the DIMMs change.  The lifecycle ledger keeps its VM-only
 # verdict: its evidence is the heartbeat's VM sample, the host arm widens the LIVE tier only.
 _HOST_MEM_FREE_FLOOR_GB = 5.0
@@ -95,10 +100,25 @@ def get_host_mem_state_path(home: Optional[Path] = None) -> Path:
 
 
 def _nonneg_number(value: Any) -> Optional[float]:
-    """Return *value* if it is a non-negative int/float (bools rejected), else None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    """Return *value* if it is a finite non-negative int/float (bools rejected), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    number = float(value)
+    # Chained comparison rejects NaN (False on the first leg) and infinities alike, so a
+    # malformed value cannot pose as a real reading.
+    return number if 0 <= number < float("inf") else None
+
+
+def _host_threshold(state: Any, key: str, default: float) -> float:
+    """The producer's derived threshold *key* from ``state["seuils"]``, else *default*.
+
+    The producer publishes the derivation of its own thresholds; reading them here keeps the
+    guard-rail from carrying a second, silently drifting derivation.  A missing/mistyped or
+    malformed value (bool, str, None, <= 0, NaN/inf) falls back to the module default.
+    """
+    seuils = state.get("seuils") if isinstance(state, dict) else None
+    value = _nonneg_number(seuils.get(key)) if isinstance(seuils, dict) else None
+    return default if value is None or value <= 0 else value
 
 
 def _is_fresh(sampled_at: Optional[datetime], moment: datetime, ttl_s: float) -> bool:
@@ -111,7 +131,9 @@ def _host_compression_confirmed(state: Any) -> bool:
     Compression is noisy at rest (~1 Go baseline, 3-4 Go spikes measured 03/10/2026): one
     sample over the ceiling is not a verdict, N consecutive ones are.  ``alerte_en_cours`` is
     the flag the operator's Telegram alert rides (``streak >= n`` plus hysteresis), so the
-    guard-rail and the message agree.
+    guard-rail and the message agree.  That ``alerte_en_cours``/``streak`` counter rides THREE
+    motifs (free memory, compression, page file) because the producer exposes no per-motif
+    counter, so the compression arm is confirmed by any sustained host alert.
     """
     if not isinstance(state, dict):
         return False
@@ -140,11 +162,13 @@ def classify_host_pressure(state: Any) -> str:
     compression = _nonneg_number(sample.get("compress_gb"))
     if free is None and compression is None:
         return "unknown"
-    if free is not None and free < _HOST_MEM_FREE_FLOOR_GB:
+    free_floor = _host_threshold(state, "libre_go", _HOST_MEM_FREE_FLOOR_GB)
+    compression_ceiling = _host_threshold(state, "compression_go", _HOST_COMPRESSION_CEILING_GB)
+    if free is not None and free < free_floor:
         return "critical"
     if (
         compression is not None
-        and compression > _HOST_COMPRESSION_CEILING_GB
+        and compression > compression_ceiling
         and _host_compression_confirmed(state)
     ):
         return "critical"

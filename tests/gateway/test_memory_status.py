@@ -45,6 +45,7 @@ def _write_host_state(
     compress_gb: float = 1.0,
     streak: int = 0,
     alerte_en_cours: bool = False,
+    seuils: dict | None = None,
 ) -> None:
     """The sample `~/.hermes/scripts/veille-host-mem.py` writes every 5 min."""
     path = home.joinpath("state", "host-mem.json")
@@ -59,7 +60,9 @@ def _write_host_state(
             "compress_gb": compress_gb,
             "vmmem_gb": 8.6,
         },
-        "seuils": {"libre_go": 5.0, "compression_go": 2.0, "n": 3, "marge_go": 0.5},
+        "seuils": {"libre_go": 5.0, "compression_go": 2.0, "n": 3, "marge_go": 0.5}
+        if seuils is None
+        else seuils,
         "dernier_publie": "sain",
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -268,5 +271,34 @@ class TestCollectMemoryStatus:
             mem_free_gb=9.0,
             compress_gb=3.5,
             streak=3,
+        )
+        assert collect_memory_status(tmp_path, now=_NOW)["pressure"] == "critical"
+
+    def test_compression_ceiling_follows_the_producers_calibration(self, tmp_path: Path) -> None:
+        # The producer publishes its OWN derivation in `seuils`; the consumer must follow the
+        # calibrated ceiling rather than keep a second, silently drifting hardcoded number.
+        # Recalibrated 04/10/2026: compression ceiling 4.5 Go (above the highest value ever
+        # observed, 4.19 Go), so 2.5 Go at rest is comfortable — not the old 2.0 Go verdict.
+        vm = {"mem_total_kib": 8 * 1024 * 1024, "mem_available_kib": 4 * 1024 * 1024}
+        _write_heartbeat(tmp_path, updated_at=_NOW - timedelta(seconds=30), mem=dict(vm))
+        calibrated = {"libre_go": 5.0, "compression_go": 4.5, "n": 3, "marge_go": 0.5}
+        _write_host_state(
+            tmp_path,
+            sampled_at=_NOW - timedelta(seconds=60),
+            mem_free_gb=9.0,
+            compress_gb=2.5,
+            alerte_en_cours=True,
+            streak=5,
+            seuils=calibrated,
+        )
+        assert collect_memory_status(tmp_path, now=_NOW)["pressure"] == "ok"
+        _write_host_state(
+            tmp_path,
+            sampled_at=_NOW - timedelta(seconds=60),
+            mem_free_gb=9.0,
+            compress_gb=4.6,
+            alerte_en_cours=True,
+            streak=5,
+            seuils=calibrated,
         )
         assert collect_memory_status(tmp_path, now=_NOW)["pressure"] == "critical"
